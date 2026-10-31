@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: payledger
+          POSTGRES_PASSWORD: payledger
+          POSTGRES_DB: payledger
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U payledger"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Lint
+        run: make lint
+      - name: Unit tests
+        run: go test -race -cover ./...
+      - name: Integration tests
+        run: make test-integration
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stack
+        run: docker compose up --build -d --wait ledger notifier relay
+      - name: End-to-end check
+        run: ./scripts/e2e.sh
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v

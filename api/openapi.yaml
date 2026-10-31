@@ -1,0 +1,180 @@
+openapi: 3.0.3
+info:
+  title: payledger
+  version: 1.0.0
+  description: |
+    Double-entry wallet ledger. Amounts are integers in minor units
+    (tiyn for KZT, cents for USD/EUR, kopecks for RUB).
+    Every money movement requires an Idempotency-Key header.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/accounts:
+    post:
+      summary: Create an account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner_id, currency]
+              properties:
+                owner_id: { type: string, maxLength: 64, example: user-42 }
+                currency: { type: string, enum: [KZT, USD, EUR, RUB] }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/v1/accounts/{id}:
+    get:
+      summary: Get an account with its current balance
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/accounts/{id}/entries:
+    get:
+      summary: Account statement, newest first, keyset pagination
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { name: cursor, in: query, schema: { type: integer, format: int64 }, description: next_cursor from the previous page }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+                  next_cursor: { type: integer, format: int64, description: absent on the last page }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/deposits:
+    post:
+      summary: Add money to an account
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AccountAmount" } } }
+      responses:
+        "201": { $ref: "#/components/responses/TransferCreated" }
+        "200": { $ref: "#/components/responses/TransferReplayed" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/v1/withdrawals:
+    post:
+      summary: Take money out of an account
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AccountAmount" } } }
+      responses:
+        "201": { $ref: "#/components/responses/TransferCreated" }
+        "200": { $ref: "#/components/responses/TransferReplayed" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/v1/transfers:
+    post:
+      summary: Move money between two accounts of the same currency
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_account_id, to_account_id, amount]
+              properties:
+                from_account_id: { type: string, format: uuid }
+                to_account_id: { type: string, format: uuid }
+                amount: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "201": { $ref: "#/components/responses/TransferCreated" }
+        "200": { $ref: "#/components/responses/TransferReplayed" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/v1/transfers/{id}:
+    get:
+      summary: Get a transfer
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Transfer" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /healthz:
+    get: { summary: Liveness, responses: { "200": { description: OK } } }
+  /readyz:
+    get: { summary: Readiness, pings PostgreSQL, responses: { "200": { description: OK }, "503": { description: Database unavailable } } }
+  /metrics:
+    get: { summary: Prometheus metrics, responses: { "200": { description: OK } } }
+components:
+  parameters:
+    ID: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 128 }
+      description: |
+        Unique per logical operation. Repeating a request with the same key
+        and body returns the original transfer (200, Idempotent-Replayed: true).
+        The same key with a different body returns 409.
+  schemas:
+    Account:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        currency: { type: string }
+        balance: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AccountAmount:
+      type: object
+      required: [account_id, amount]
+      properties:
+        account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, minimum: 1, maximum: 1000000000000 }
+    Transfer:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [deposit, withdrawal, transfer] }
+        from_account_id: { type: string, format: uuid }
+        to_account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+    Entry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        transfer_id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid }
+        amount: { type: integer, format: int64, description: negative for debit, positive for credit }
+        balance_after: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        field: { type: string }
+  responses:
+    Error:
+      description: Error
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    RateLimited:
+      description: Too many requests, see Retry-After
+      headers: { Retry-After: { schema: { type: integer } } }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    TransferCreated:
+      description: Transfer executed
+      content: { application/json: { schema: { $ref: "#/components/schemas/Transfer" } } }
+    TransferReplayed:
+      description: Same request was already executed; the original transfer is returned
+      headers: { Idempotent-Replayed: { schema: { type: string, enum: ["true"] } } }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Transfer" } } }
